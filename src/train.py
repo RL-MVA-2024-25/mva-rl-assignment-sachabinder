@@ -16,6 +16,15 @@ env = TimeLimit(
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+'''
+First, we need to define buffer allowing us
+to sample data form the environment with an iid assumption.
+We will store all the samples in a training set with a distribution
+that is close to the distribution of the policy we are trying to learn, 
+and independently sample from this training set to train the model.
+
+We will use the ReplayBuffer class introduced in the notebook RL4 (FIFO mechanism).
+'''
 
 class ReplayBuffer:
     def __init__(self, capacity, device):
@@ -33,33 +42,28 @@ class ReplayBuffer:
         return list(map(lambda x:torch.Tensor(np.array(x)).to(self.device), list(zip(*batch))))
     def __len__(self):
         return len(self.data)
+    
 
+'''
+Our model will build an approximate value iteration function using neural networks.
+For this, we implemented a very simple Deep Q-Network (DQN) model described in 'Playing Atari with Deep Reinforcement Learning' by Mnih et al. (2013).
+The model takes epsilon-greedy actions, with a decreasing epsilon over time, stores the samples in a replay buffer, 
+and at each interaction compute the target values of a drawn mini-batch to take a gradient step.
+
+The model was selected through a hyperparameter search, starting from the base model given in the RL4 notebook
+We increased epsilon decay period to 1000 to increase exploration at the beginning of the training, (wait 1000 steps before decay)
+and did the same with the epsilon delay to 100 (20 was too fast). 
+
+The best tested results we got with a simple neural network with 5 hidden layers, 
+starting at 256 neurons and increasing by a factor of 2 at each layer, the last layers being of size 1024
+(the number of neurons are chosen as multiples of 2 to allow for better parallelization on GPUs).
+The batch sizes were increased to 512 to allow for better generalization (as the problem is more complicated than cartpole), 
+and the number of gradient steps was increased to 3 to allow for better convergence
+The training was done on 200 episodes, but the best models were obtained after 100 episodes in general.
+'''
+    
 
 class ProjectAgent:
-    def __init__(self):
-            # Simple initialization of the agent with the configuration
-            self.get_config()
-            self.path = "src/best_checkpoint.pt"
-            self.nb_actions = self.config['n_action']
-            self.model = self.get_DQN()
-            self.gamma = self.config['gamma']
-            self.batch_size = self.config['batch_size']
-            buffer_size = self.config['buffer_size']
-            self.memory = ReplayBuffer(buffer_size,DEVICE)
-            self.epsilon_max = self.config['epsilon_max']
-            self.epsilon_min = self.config['epsilon_min']
-            self.epsilon_stop = self.config['epsilon_decay_period']
-            self.epsilon_delay = self.config['epsilon_delay_decay']
-            self.epsilon_step = (self.epsilon_max-self.epsilon_min)/self.epsilon_stop
-            self.target_model = deepcopy(self.model).to(DEVICE)
-            self.criterion = self.config['criterion']
-            lr = self.config['learning_rate']
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr) # Standard optimizer
-            self.nb_gradient_steps = self.config['gradient_steps']
-            # Using the replace strategy
-            # replacing the target network every  200 steps by the current model
-            self.update_target_freq = self.config['update_target_freq']
-
     def act(self, observation, use_random=False):
         device = "cuda" if next(self.model.parameters()).is_cuda else "cpu"
         with torch.no_grad():
@@ -104,11 +108,39 @@ class ProjectAgent:
             nn.ReLU(),
             nn.Linear(nb_neurons, nb_neurons),
             nn.ReLU(),
-            nn.Linear(nb_neurons, nb_neurons),
+            nn.Linear(nb_neurons, nb_neurons*2),
             nn.ReLU(),
-            nn.Linear(nb_neurons, n_action)
+            nn.Linear(nb_neurons*2, nb_neurons*4),
+            nn.ReLU(),
+            nn.Linear(nb_neurons*4, nb_neurons*8),
+            nn.ReLU(),
+            nn.Linear(nb_neurons*8, n_action)
         ).to(DEVICE)
         return DQN
+
+    def __init__(self):
+        # Simple initialization of the agent with the configuration
+        self.get_config()
+        self.path = "src/model.pt"
+        self.nb_actions = self.config['n_action']
+        self.model = self.get_DQN()
+        self.gamma = self.config['gamma']
+        self.batch_size = self.config['batch_size']
+        buffer_size = self.config['buffer_size']
+        self.memory = ReplayBuffer(buffer_size,DEVICE)
+        self.epsilon_max = self.config['epsilon_max']
+        self.epsilon_min = self.config['epsilon_min']
+        self.epsilon_stop = self.config['epsilon_decay_period']
+        self.epsilon_delay = self.config['epsilon_delay_decay']
+        self.epsilon_step = (self.epsilon_max-self.epsilon_min)/self.epsilon_stop
+        self.target_model = deepcopy(self.model).to(DEVICE)
+        self.criterion = self.config['criterion']
+        lr = self.config['learning_rate']
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr) # Standard optimizer
+        self.nb_gradient_steps = self.config['gradient_steps']
+        # Using the replace strategy
+        # replacing the target network every  200 steps by the current model
+        self.update_target_freq = self.config['update_target_freq']
 
     def gradient_step(self):
         if len(self.memory) > self.batch_size:
@@ -191,7 +223,13 @@ class ProjectAgent:
                 state = next_state
         return episode_return
 
+'''
+# Code for the training loop (training done on google collab):
 
-if __name__ == "__main__":
-    agent = ProjectAgent()
-    episode_return = agent.train(env)
+env = TimeLimit(
+    env=HIVPatient(domain_randomization=False), max_episode_steps=200
+)
+
+agent = ProjectAgent()
+episode_return = agent.train(env)
+'''
