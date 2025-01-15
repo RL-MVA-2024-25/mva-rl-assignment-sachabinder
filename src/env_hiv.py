@@ -1,6 +1,8 @@
 import gymnasium as gym
 import numpy as np
 
+from typing import Union
+
 
 class HIVPatient(gym.Env):
     """HIV patient simulator
@@ -134,7 +136,7 @@ class HIVPatient(gym.Env):
         self.deltaE = 0.1  # natural death rate (per day)
 
     def reset(
-        self, *, seed: int | None = None, options: dict | None = None, mode="unhealthy"
+        self, *, seed: Union[int,None] = None, options: Union[dict, None] = None, mode="unhealthy"
     ):
         if mode == "uninfected":
             self.T1 = 1e6
