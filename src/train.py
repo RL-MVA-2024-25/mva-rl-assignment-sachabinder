@@ -233,3 +233,15 @@ class ReplayBuffer:
         return list(map(lambda x:torch.Tensor(np.array(x)).to(self.device), list(zip(*batch))))
     def __len__(self):
         return len(self.data)
+    
+
+if __name__ == "__main__":
+    agent = ProjectAgent()
+    episode_return = agent.train(env)
+
+    # Evaluate agent and write score.
+    score_agent: float = evaluate_HIV(agent=agent, nb_episode=5)
+    score_agent_dr: float = evaluate_HIV_population(agent=agent, nb_episode=20)
+    path = "./"
+    with open(file=path + "score1.txt", mode="w") as f:
+        f.write(f"{score_agent}\n{score_agent_dr}")
