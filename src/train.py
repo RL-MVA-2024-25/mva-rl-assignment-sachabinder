@@ -18,15 +18,29 @@ env = TimeLimit(
 )  # The time wrapper limits the number of steps in an episode at 200.
 # Now is the floor is yours to implement the agent and train it.
 
+class ReplayBuffer:
+    def __init__(self, capacity, device):
+        self.capacity = capacity 
+        self.data = []
+        self.index = 0
+        self.device = device
+    def append(self, s, a, r, s_, d):
+        if len(self.data) < self.capacity:
+            self.data.append(None)
+        self.data[self.index] = (s, a, r, s_, d)
+        self.index = (self.index + 1) % self.capacity
+    def sample(self, batch_size):
+        batch = random.sample(self.data, batch_size)
+        return list(map(lambda x:torch.Tensor(np.array(x)).to(self.device), list(zip(*batch))))
+    def __len__(self):
+        return len(self.data)
 
 # You have to implement your own agent.
 # Don't modify the methods names and signatures, but you can add methods.
 # ENJOY!
 
-###############################################################################
-# We implement a DQN
-
 class ProjectAgent:
+
     def act(self, observation, use_random=False):
         device = "cuda" if next(self.model.parameters()).is_cuda else "cpu"
         with torch.no_grad():
@@ -214,30 +228,11 @@ class ProjectAgent:
         path = os.getcwd()
         self.save(path)
         return episode_return
-
-###############################################################################
-# We create a replay buffer (replay_buffer2 given in class):
-class ReplayBuffer:
-    def __init__(self, capacity, device):
-        self.capacity = capacity 
-        self.data = []
-        self.index = 0
-        self.device = device
-    def append(self, s, a, r, s_, d):
-        if len(self.data) < self.capacity:
-            self.data.append(None)
-        self.data[self.index] = (s, a, r, s_, d)
-        self.index = (self.index + 1) % self.capacity
-    def sample(self, batch_size):
-        batch = random.sample(self.data, batch_size)
-        return list(map(lambda x:torch.Tensor(np.array(x)).to(self.device), list(zip(*batch))))
-    def __len__(self):
-        return len(self.data)
     
 
 if __name__ == "__main__":
     agent = ProjectAgent()
-    episode_return = agent.train(env)
+    episode_return = agent.train()
 
     # Evaluate agent and write score.
     score_agent: float = evaluate_HIV(agent=agent, nb_episode=5)
