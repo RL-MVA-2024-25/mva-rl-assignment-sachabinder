@@ -1,28 +1,27 @@
-# Imports
-
-import os
-import random
-from copy import deepcopy
-
-import numpy as np
-import torch
-import torch.nn as nn
 from gymnasium.wrappers import TimeLimit
-
 from env_hiv import HIVPatient
-from evaluate import evaluate_HIV, evaluate_HIV_population
+from evaluate import evaluate_HIV
 
+import random
+import torch
+import numpy as np
+import torch.nn as nn
+from copy import deepcopy
+import os
 
 env = TimeLimit(
-    env=HIVPatient(domain_randomization=True), max_episode_steps=200
+    env=HIVPatient(domain_randomization=False), max_episode_steps=200
 )  # The time wrapper limits the number of steps in an episode at 200.
 # Now is the floor is yours to implement the agent and train it.
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class ReplayBuffer:
     def __init__(self, capacity, device):
-        self.capacity = capacity 
+        self.capacity = int(capacity) # capacity of the buffer
         self.data = []
-        self.index = 0
+        self.index = 0 # index of the next cell to be filled
         self.device = device
     def append(self, s, a, r, s_, d):
         if len(self.data) < self.capacity:
@@ -35,208 +34,164 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.data)
 
-# You have to implement your own agent.
-# Don't modify the methods names and signatures, but you can add methods.
-# ENJOY!
 
 class ProjectAgent:
+    def __init__(self):
+            # Simple initialization of the agent with the configuration
+            self.get_config()
+            self.path = "src/best_checkpoint.pt"
+            self.nb_actions = self.config['n_action']
+            self.model = self.get_DQN()
+            self.gamma = self.config['gamma']
+            self.batch_size = self.config['batch_size']
+            buffer_size = self.config['buffer_size']
+            self.memory = ReplayBuffer(buffer_size,DEVICE)
+            self.epsilon_max = self.config['epsilon_max']
+            self.epsilon_min = self.config['epsilon_min']
+            self.epsilon_stop = self.config['epsilon_decay_period']
+            self.epsilon_delay = self.config['epsilon_delay_decay']
+            self.epsilon_step = (self.epsilon_max-self.epsilon_min)/self.epsilon_stop
+            self.target_model = deepcopy(self.model).to(DEVICE)
+            self.criterion = self.config['criterion']
+            lr = self.config['learning_rate']
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr) # Standard optimizer
+            self.nb_gradient_steps = self.config['gradient_steps']
+            # Using the replace strategy
+            # replacing the target network every  200 steps by the current model
+            self.update_target_freq = self.config['update_target_freq']
 
     def act(self, observation, use_random=False):
         device = "cuda" if next(self.model.parameters()).is_cuda else "cpu"
         with torch.no_grad():
             Q = self.model(torch.Tensor(observation).unsqueeze(0).to(device))
-            return torch.argmax(Q).item()
+        return torch.argmax(Q).item()
 
     def save(self, path):
-        self.path = path + "/best_checkpoint.pt"
-        torch.save(self.model.state_dict(), self.path)
-        return 
+        torch.save(self.model.state_dict(), path)
 
     def load(self):
-        device = torch.device('cpu')
-        self.path = os.path.join(os.path.dirname(__file__), "best_checkpoint.pt")
-        self.model = self.myDQN({}, device)
-        self.model.load_state_dict(torch.load(self.path, map_location=device))
+        cpu_device = torch.device("cpu")
+        DQN = self.get_DQN()
+        self.model = DQN.to(cpu_device)
+        self.model.load_state_dict(torch.load(self.path, map_location=cpu_device, weights_only=True))
         self.model.eval()
-        return 
-    
-    # Now we add our methods
-    # Function to take the greedy action
-    def act_greedy(self, myDQN, state):
-        device = "cuda" if next(myDQN.parameters()).is_cuda else "cpu"
-        with torch.no_grad():
-            Q = myDQN(torch.Tensor(state).unsqueeze(0).to(device))
-            return torch.argmax(Q).item()
-        
+        return
+
+    def get_config(self):
+      # Setting the configuration dictionnary for the model
+      self.config = {'n_action': env.action_space.n,
+          'state_dim': env.observation_space.shape[0],
+          'learning_rate': 0.001,
+          'gamma': 0.99, 
+          'buffer_size': 100000, # We get a smaller buffer size memory to not overload the computer
+          'epsilon_min': 0.01,
+          'epsilon_max': 1., # Pure random exploration at the beginning
+          'epsilon_decay_period': 10000,
+          'epsilon_delay_decay': 100,
+          'batch_size': 512,
+          'gradient_steps': 3, 
+          'update_target_freq': 200,
+          'criterion': torch.nn.SmoothL1Loss()}
+      return
+
+    def get_DQN(self):
+        # Defining an instance of the DQN model tested
+        state_dim = self.config['state_dim']
+        n_action = self.nb_actions
+        nb_neurons = 256
+        DQN = torch.nn.Sequential(
+            nn.Linear(state_dim, nb_neurons),
+            nn.ReLU(),
+            nn.Linear(nb_neurons, nb_neurons),
+            nn.ReLU(),
+            nn.Linear(nb_neurons, nb_neurons),
+            nn.ReLU(),
+            nn.Linear(nb_neurons, n_action)
+        ).to(DEVICE)
+        return DQN
+
     def gradient_step(self):
         if len(self.memory) > self.batch_size:
             X, A, R, Y, D = self.memory.sample(self.batch_size)
+            # run through the target model
             QYmax = self.target_model(Y).max(1)[0].detach()
             update = torch.addcmul(R, 1-D, QYmax, value=self.gamma)
             QXA = self.model(X).gather(1, A.to(torch.long).unsqueeze(1))
             loss = self.criterion(QXA, update.unsqueeze(1))
             self.optimizer.zero_grad()
             loss.backward()
-            self.optimizer.step() 
-
-    # DQN (ideas for later: double DQN? more layers? test dropout)
-    def myDQN(self, config, device):
-
-        state_dim = env.observation_space.shape[0]
-        n_action = env.action_space.n # .n returns the number of possible actions
-        nb_neurons=256 # Power of 2 works better
-
-      # Possible to define it as usual (as a class, not sequential)
-        DQN = torch.nn.Sequential(
-            nn.Linear(state_dim, nb_neurons),
-            #nn.SiLU(), ReLU seems to work better
-            nn.ReLU(),
-            nn.Linear(nb_neurons, nb_neurons),
-            #nn.SiLU(),
-            nn.ReLU(),
-            nn.Linear(nb_neurons, nb_neurons),
-            #nn.SiLU(),
-            nn.ReLU(),
-            nn.Linear(nb_neurons, nb_neurons),
-            #nn.SiLU(),
-            nn.ReLU(),
-            nn.Linear(nb_neurons, nb_neurons),
-            #nn.SiLU(),
-            nn.ReLU(),
-            nn.Linear(nb_neurons, n_action)
-            ).to(device)
-
-        return DQN
-
-    def train(self):
-
-        config = {'nb_actions': env.action_space.n,
-                'learning_rate': 0.001,
-                'gamma': 0.98,
-                'buffer_size': 100000,
-                'epsilon_min': 0.02,
-                'epsilon_max': 1.,
-                'epsilon_decay_period': 21000, 
-                'epsilon_delay_decay': 100,
-                'batch_size': 790,
-                'gradient_steps': 3,
-                'update_target_strategy': 'replace', # or 'ema' (tried but replace seems to work better for this model/problem)
-                'update_target_freq': 400,
-                'update_target_tau': 0.005,
-                'criterion': torch.nn.SmoothL1Loss()}
-
+            self.optimizer.step()
     
-        device = device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print('Using device:', device)
-        self.model = self.myDQN(config, device)
-        self.target_model = deepcopy(self.model).to(device)
+    def gradient_step_double(self):
+        '''
+        We test the Double DQN model from  Deep Reinforcement Learning with Double Q-Learning by Hasselt et al. (2015)
+        The difference lies in how the target values are computed for the update
+        Instead of using argmax Q_target for action selection, we use the current model to select the highest Q value action
+        The action is then evaluated using the target model like before
 
-        self.gamma = config['gamma']
-        self.batch_size = config['batch_size']
-        self.nb_actions = config['nb_actions']
+        The results were not as good as the standard DQN model, so we kept the standard model for the final training.
+        '''
+        if len(self.memory) > self.batch_size:
+            X, A, R, Y, D = self.memory.sample(self.batch_size)
+            next_actions = self.model(Y).argmax(1).detach()
+            QYmax = self.target_model(Y).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+            update = torch.addcmul(R, 1-D, QYmax, value=self.gamma)
+            QXA = self.model(X).gather(1, A.to(torch.long).unsqueeze(1))
+            loss = self.criterion(QXA, update.unsqueeze(1))
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
-        # epsilon greedy strategy
-        epsilon_max = config['epsilon_max']
-        epsilon_min = config['epsilon_min']
-        epsilon_stop = config['epsilon_decay_period'] if 'epsilon_decay_period' in config.keys() else 1000
-        epsilon_delay = config['epsilon_delay_decay'] if 'epsilon_delay_decay' in config.keys() else 20
-        epsilon_step = (epsilon_max-epsilon_min)/epsilon_stop
-
-        # memory buffer
-        self.memory = ReplayBuffer(config['buffer_size'], device)
-
-        self.criterion = config['criterion'] if 'criterion' in config.keys() else torch.nn.MSELoss()
-        lr = config['learning_rate'] if 'learning_rate' in config.keys() else 0.001
-        
-        self.optimizer = config['optimizer'] if 'optimizer' in config.keys() else torch.optim.Adam(self.model.parameters(), lr=lr)
-        self.optimizer2 = config['optimizer'] if 'optimizer' in config.keys() else torch.optim.Adam(self.model.parameters(), lr=lr)
-        #self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=88, gamma=0.1)
-
-        nb_gradient_steps = config['gradient_steps'] if 'gradient_steps' in config.keys() else 1
-
-        # target network
-        update_target_strategy = config['update_target_strategy'] if 'update_target_strategy' in config.keys() else 'replace'
-        update_target_freq = config['update_target_freq'] if 'update_target_freq' in config.keys() else 20
-        update_target_tau = config['update_target_tau'] if 'update_target_tau' in config.keys() else 0.005
-
-
-        previous_val = 0
-
-        max_episode = 350 
-
+    def train(self, env, max_episode=200):
         episode_return = []
         episode = 0
         episode_cum_reward = 0
         state, _ = env.reset()
-        epsilon = epsilon_max
+        epsilon = self.epsilon_max
         step = 0
 
-        ## TRAIN NETWORK
-
+        # Keep the score on the chosen patient
+        # to get the model with the best result
+        score = 0
         while episode < max_episode:
-            # update epsilon
-            if step > epsilon_delay:
-                epsilon = max(epsilon_min, epsilon-epsilon_step)
+            if step > self.epsilon_delay:
+                epsilon = max(self.epsilon_min, epsilon-self.epsilon_step)
             if np.random.rand() < epsilon:
                 action = env.action_space.sample()
             else:
-                action = self.act_greedy(self.model, state)
-            
+                action = self.act(state)
+
             next_state, reward, done, trunc, _ = env.step(action)
             self.memory.append(state, action, reward, next_state, done)
             episode_cum_reward += reward
-            
-            for _ in range(nb_gradient_steps): 
+
+            for _ in range(self.nb_gradient_steps):
                 self.gradient_step()
 
-            if update_target_strategy == 'replace': 
-                if step % update_target_freq == 0: 
-                    self.target_model.load_state_dict(self.model.state_dict())
-            if update_target_strategy == 'ema':
-                target_state_dict = self.target_model.state_dict()
-                model_state_dict = self.model.state_dict()
-                tau = update_target_tau
-                for key in model_state_dict:
-                    target_state_dict[key] = tau*model_state_dict[key] + (1-tau)*target_state_dict[key]
-                self.target_model.load_state_dict(target_state_dict)
-            
+            if step % self.update_target_freq == 0:
+                self.target_model.load_state_dict(self.model.state_dict())
             step += 1
             if done or trunc:
                 episode += 1
-                
-                validation_score = evaluate_HIV(agent=self, nb_episode=1)
-                                
-                print(f"Episode {episode:3d} | "
-                      f"Epsilon {epsilon:6.2f} | "
-                      f"Batch Size {len(self.memory):5d} | "
-                      f"Episode Return {episode_cum_reward:.2e} | "
-                      f"Evaluation Score {validation_score:.2e}")
+                val_score = evaluate_HIV(agent=self, nb_episode=1)
+                print("Episode ", '{:3d}'.format(episode),
+                      ", epsilon ", '{:6.2f}'.format(epsilon),
+                      ", batch size ", '{:5d}'.format(len(self.memory)),
+                      ", episode return ", '{:4.1f}'.format(episode_cum_reward),
+                      ", Evaluation score  ", '{:2e}'.format(val_score),
+                      sep='')
                 state, _ = env.reset()
-
-                if validation_score > previous_val:
-                    previous_val = validation_score
-                    self.best_model = deepcopy(self.model).to(device)
-                    path = os.getcwd()
-                    self.save(path)
+                if val_score > score:
+                  score = val_score
+                  self.best_model = deepcopy(self.model).to(DEVICE)
+                  self.save(self.path)
                 episode_return.append(episode_cum_reward)
-                
                 episode_cum_reward = 0
             else:
                 state = next_state
-
-        self.model.load_state_dict(self.best_model.state_dict())
-        path = os.getcwd()
-        self.save(path)
         return episode_return
-    
+
 
 if __name__ == "__main__":
     agent = ProjectAgent()
-    episode_return = agent.train()
-
-    # Evaluate agent and write score.
-    score_agent: float = evaluate_HIV(agent=agent, nb_episode=5)
-    score_agent_dr: float = evaluate_HIV_population(agent=agent, nb_episode=20)
-    path = "./"
-    with open(file=path + "score1.txt", mode="w") as f:
-        f.write(f"{score_agent}\n{score_agent_dr}")
+    episode_return = agent.train(env)
